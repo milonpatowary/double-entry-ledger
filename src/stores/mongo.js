@@ -36,19 +36,7 @@ function createMongoStore ({ db, client = null, prefix = '', autoIndex = true } 
 
   function ensureIndexes () {
     if (!indexPromise) {
-      indexPromise = Promise.all([
-        // Uniqueness is what makes idempotency safe under concurrency: two
-        // simultaneous posts with the same key cannot both insert, whatever the
-        // application layer believes.
-        entries.createIndex(
-          { idempotencyKey: 1 },
-          { unique: true, partialFilterExpression: { idempotencyKey: { $type: 'string' } }, name: 'idempotency' }
-        ),
-        entries.createIndex({ 'postings.account': 1, createdAt: -1 }, { name: 'by_account' }),
-        entries.createIndex({ createdAt: 1 }, { name: 'chronological' }),
-        entries.createIndex({ reverses: 1 }, { sparse: true, name: 'reversals' }),
-        accounts.createIndex({ currency: 1, type: 1 }, { name: 'by_currency_type' })
-      ]).catch((err) => {
+      indexPromise = buildIndexes().catch((err) => {
         indexPromise = null
         throw err
       })
@@ -56,11 +44,52 @@ function createMongoStore ({ db, client = null, prefix = '', autoIndex = true } 
     return indexPromise
   }
 
+  /**
+   * Created one at a time, and the collections created explicitly first.
+   *
+   * Firing these concurrently races: several `createIndex` calls against a
+   * collection that does not exist yet each try to create it implicitly, and
+   * the server logs "Conflicted registering namespace". Creating the
+   * collections up front removes the race, and doing the rest sequentially
+   * keeps it removed. This runs once per process, so there is nothing to gain
+   * from the parallelism that caused it.
+   */
+  async function buildIndexes () {
+    for (const name of [`${prefix}accounts`, `${prefix}entries`, `${prefix}balances`]) {
+      // Already exists is the normal case and not an error.
+      await db.createCollection(name).catch((err) => {
+        if (err?.codeName !== 'NamespaceExists' && err?.code !== 48) throw err
+      })
+    }
+
+    const specs = [
+      // Uniqueness is what makes idempotency safe under concurrency: two
+      // simultaneous posts with the same key cannot both insert, whatever the
+      // application layer believes.
+      [entries, { idempotencyKey: 1 },
+        { unique: true, partialFilterExpression: { idempotencyKey: { $type: 'string' } }, name: 'idempotency' }],
+      [entries, { 'postings.account': 1, createdAt: -1 }, { name: 'by_account' }],
+      [entries, { createdAt: 1 }, { name: 'chronological' }],
+      [entries, { reverses: 1 }, { sparse: true, name: 'reversals' }],
+      [accounts, { currency: 1, type: 1 }, { name: 'by_currency_type' }]
+    ]
+
+    for (const [collection, keys, options] of specs) {
+      await collection.createIndex(keys, options)
+    }
+  }
+
   const ready = async () => { if (autoIndex) await ensureIndexes() }
 
   /**
    * Transactions need a replica set or a sharded cluster; a standalone mongod
-   * rejects them. Rather than require one, this probes once and adapts.
+   * rejects them. Rather than require one, this asks the server and adapts.
+   *
+   * Asking is important. The obvious probe — start a transaction and abort it —
+   * is worthless: aborting a transaction that has performed no operations never
+   * contacts the server, so it succeeds on a standalone too and the store then
+   * takes a path the deployment cannot support. `hello` reports the topology
+   * directly: `setName` for a replica set, `msg: "isdbgrid"` for mongos.
    */
   async function canUseTransactions () {
     if (transactionsSupported !== null) return transactionsSupported
@@ -68,15 +97,13 @@ function createMongoStore ({ db, client = null, prefix = '', autoIndex = true } 
       transactionsSupported = false
       return false
     }
-    const session = client.startSession()
     try {
-      session.startTransaction()
-      await session.abortTransaction()
-      transactionsSupported = true
+      const hello = await db.admin().command({ hello: 1 })
+      transactionsSupported = Boolean(hello.setName) || hello.msg === 'isdbgrid'
     } catch {
+      // If the topology cannot be determined, assume the safer path — the
+      // compensating one works everywhere.
       transactionsSupported = false
-    } finally {
-      await session.endSession()
     }
     return transactionsSupported
   }

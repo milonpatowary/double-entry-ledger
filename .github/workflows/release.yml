@@ -91,12 +91,22 @@ jobs:
           # only if you are not using trusted publishing.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      # Release notes are built into a file rather than passed inline. A
+      # multi-line --notes argument must stay indented inside the block scalar;
+      # a line starting at column 0 ends the block and makes the whole workflow
+      # unparseable, which GitHub reports as a zero-second failure named after
+      # the file path, with no error message anywhere in the UI.
       - name: GitHub Release
-        run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --notes "Published to npm as \`$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")\`.
-
-See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md)."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          {
+            echo "Published to npm as \`${NAME}@${VERSION}\`."
+            echo
+            echo "See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md)."
+          } > /tmp/release-notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file /tmp/release-notes.md

@@ -22,7 +22,7 @@
  * It is not a substitute for the real server. test/integration/ runs the same
  * contract against a real mongod, and CI runs that on every push.
  */
-function createFakeMongo () {
+function createFakeMongo ({ replicaSet = null } = {}) {
   const collections = new Map()
 
   function getCollection (name) {
@@ -117,6 +117,39 @@ function createFakeMongo () {
   }
 
   return {
+    /**
+     * Creating a collection that exists throws NamespaceExists, exactly as the
+     * server does — the store relies on catching that rather than checking
+     * first, which would be its own race.
+     */
+    async createCollection (name) {
+      if (collections.has(name)) {
+        const err = new Error(`Collection ${name} already exists.`)
+        err.code = 48
+        err.codeName = 'NamespaceExists'
+        throw err
+      }
+      getCollection(name)
+      return this.collection(name)
+    },
+
+    /**
+     * `hello` is how the store decides whether transactions are available.
+     * Reporting no `setName` models a standalone mongod, which is the default
+     * here and the deployment most users are on.
+     */
+    admin () {
+      return {
+        async command (spec) {
+          if (spec.hello === 1 || spec.isMaster === 1) {
+            return replicaSet ? { ok: 1, setName: replicaSet } : { ok: 1 }
+          }
+          if (spec.buildInfo === 1) return { ok: 1, version: '7.0.0-fake' }
+          throw new Error(`fake-mongo: unsupported admin command ${JSON.stringify(spec)}`)
+        }
+      }
+    },
+
     collection (name) {
       const state = getCollection(name)
 

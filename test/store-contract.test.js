@@ -203,6 +203,57 @@ test('the fake mongo enforces the unique index the store depends on', async () =
   assert.equal(col._size(), 3)
 })
 
+test('transaction support is decided by the topology, not by a hopeful probe', async () => {
+  // The tempting probe — start a transaction and abort it — is worthless,
+  // because aborting one that performed no operations never contacts the
+  // server. It reports success on a standalone, and the store then takes a path
+  // the deployment cannot support. Asking `hello` is the actual answer.
+  const noop = { entry: { id: 'x', postings: [], idempotencyKey: null, fingerprint: 'f' }, deltas: [] }
+
+  const standalone = createMongoStore({
+    db: createFakeMongo(),
+    client: { startSession: () => ({}) }
+  })
+  assert.equal(standalone.supportsTransactions, null, 'not probed until it matters')
+  await standalone.commit(noop).catch(() => {})
+  assert.equal(standalone.supportsTransactions, false, 'standalone: no transactions')
+
+  const replicaSet = createMongoStore({
+    db: createFakeMongo({ replicaSet: 'rs0' }),
+    client: { startSession: () => ({}) }
+  })
+  await replicaSet.commit({
+    entry: { id: 'x', postings: [], idempotencyKey: null, fingerprint: 'f' },
+    deltas: []
+  }).catch(() => {})
+  assert.equal(replicaSet.supportsTransactions, true, 'replica set: transactions available')
+})
+
+test('no client at all means no transactions', async () => {
+  const store = createMongoStore({ db: createFakeMongo({ replicaSet: 'rs0' }) })
+  await store.commit({
+    entry: { id: 'y', postings: [], idempotencyKey: null, fingerprint: 'f' },
+    deltas: []
+  }).catch(() => {})
+  assert.equal(store.supportsTransactions, false, 'without a client there is no session to use')
+})
+
+test('indexes are created without racing to make the collections', async () => {
+  const db = createFakeMongo()
+  const store = createMongoStore({ db })
+
+  // Concurrent createIndex against a collection that does not exist yet made
+  // the server log "Conflicted registering namespace". Collections are created
+  // explicitly first now, and the indexes built one at a time.
+  await Promise.all([store.ensureIndexes(), store.ensureIndexes(), store.ensureIndexes()])
+
+  assert.deepEqual(
+    db._collections().sort(),
+    ['accounts', 'balances', 'entries'],
+    'all three exist, created once each'
+  )
+})
+
 test('the fake mongo honours a $gte filter, which is how the guard works', async () => {
   const db = createFakeMongo()
   const col = db.collection('balances')
