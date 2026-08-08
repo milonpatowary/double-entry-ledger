@@ -1,0 +1,10 @@
+# Require review on everything.
+*                   @milonpatowary
+
+# Called out separately because these are the files an attacker would target:
+# a donation address swapped by one character in an otherwise innocuous docs PR,
+# or a workflow edited to leak a secret. Both need a deliberate look, not a
+# glance at a green diff.
+/DONATE.md          @milonpatowary
+/.github/FUNDING.yml @milonpatowary
+/.github/workflows/ @milonpatowary

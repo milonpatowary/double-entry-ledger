@@ -1,0 +1,27 @@
+{
+  "name": "double-entry-ledger",
+  "version": "0.1.0",
+  "description": "A double-entry ledger for Node and MongoDB. Balanced by construction, append-only, idempotent, and reconcilable. Zero dependencies.",
+  "main": "src/index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts", "require": "./src/index.js", "default": "./src/index.js" },
+    "./package.json": "./package.json"
+  },
+  "files": ["src", "index.d.ts", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:integration": "node --test test/integration/*.test.js",
+    "example": "node examples/wallet.js",
+    "prepublishOnly": "npm test"
+  },
+  "keywords": ["ledger","double-entry","accounting","bookkeeping","mongodb","money","payments","balance","fintech","audit"],
+  "author": "Milon Patowary <support@zexabit.com> (https://zexabit.com)",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/milonpatowary/double-entry-ledger.git" },
+  "homepage": "https://github.com/milonpatowary/double-entry-ledger#readme",
+  "funding": { "type": "github", "url": "https://github.com/sponsors/milonpatowary" },
+  "engines": { "node": ">=18" },
+  "dependencies": {},
+  "optionalDependencies": { "mongodb": "^6.10.0" }
+}
