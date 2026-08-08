@@ -1,9 +1,15 @@
 name: Release
 
-# Publishes to npm when a v* tag is pushed.
+# Publishes to npm. Two ways in:
 #
-#   npm version patch   # bumps package.json, commits, creates the tag
-#   git push --follow-tags
+#   1. Push a tag:
+#        npm version patch        # bumps package.json, commits, creates the tag
+#        git push --follow-tags
+#
+#   2. Actions -> Release -> Run workflow, and type the version. The workflow
+#      creates the tag itself. This exists because pushing a tag is not always
+#      possible — some networks and proxies permit writes to refs/heads/* and
+#      refuse refs/tags/*, which shows up as a bare 403 with no explanation.
 #
 # Publishing from CI rather than a laptop buys three things: the tests that gate
 # the release are the same ones CI runs, --provenance produces a real attestation
@@ -14,6 +20,12 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 0.1.0 (must match package.json)'
+        required: true
+        type: string
 
 permissions:
   contents: write   # create the GitHub Release
@@ -43,18 +55,26 @@ jobs:
 
       - run: npm install
 
-      # A tag that disagrees with package.json publishes the wrong version under
-      # the right name, and npm versions are immutable — so this is checked
-      # before anything else runs.
-      - name: Tag must match package.json
+      # A version that disagrees with package.json publishes the wrong version
+      # under the right name, and npm versions are immutable — so this is
+      # settled before anything else runs, whichever way the run was started.
+      - name: Resolve and check the version
+        id: release
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${VERSION#v}"
           PKG=$(node -p "require('./package.json').version")
-          echo "tag=$TAG  package.json=$PKG"
-          if [ "$TAG" != "$PKG" ]; then
-            echo "::error::Tag v$TAG does not match package.json version $PKG."
+          echo "requested=$VERSION  package.json=$PKG"
+          if [ "$VERSION" != "$PKG" ]; then
+            echo "::error::Requested v$VERSION does not match package.json version $PKG."
             exit 1
           fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
       # npm would reject a duplicate anyway, but it does so after running
       # everything below. Failing here says why in one line.
@@ -101,12 +121,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           NAME=$(node -p "require('./package.json').name")
-          VERSION=$(node -p "require('./package.json').version")
+          VERSION="${{ steps.release.outputs.version }}"
+          TAG="${{ steps.release.outputs.tag }}"
           {
             echo "Published to npm as \`${NAME}@${VERSION}\`."
             echo
             echo "See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md)."
           } > /tmp/release-notes.md
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
+          # --target is what lets a dispatched run create the tag; on a tag
+          # push the tag already exists and gh reuses it.
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
             --notes-file /tmp/release-notes.md
