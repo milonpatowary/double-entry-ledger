@@ -76,6 +76,37 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
+      # Both of npm's authentication failures are expensive to discover late.
+      # Everything below this point spins up service containers and runs the
+      # full suite — several minutes — only to be told at the very last step
+      # that the registry will not take the package. These two checks cost a
+      # second and cover the cases that actually happen:
+      #
+      #   no secret at all   -> ENEEDAUTH, and the log shows an empty
+      #                         NODE_AUTH_TOKEN, which is easy to read past
+      #   a bad or expired
+      #   token              -> E401 at the very end
+      #
+      # What they cannot catch is a token that authenticates but is not allowed
+      # to publish *this* package — see the hint after the publish step.
+      - name: Check the npm credentials before spending a test run
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            if [ "${{ vars.NPM_TRUSTED_PUBLISHING }}" = "true" ]; then
+              echo "No NPM_TOKEN, and NPM_TRUSTED_PUBLISHING is set. Relying on OIDC."
+              exit 0
+            fi
+            echo "::error::The NPM_TOKEN secret is not set on this repository. Secrets are per-repository — setting one on a sibling repo does nothing here. Add it under Settings > Secrets and variables > Actions, or set the repository variable NPM_TRUSTED_PUBLISHING=true if you have configured npm Trusted Publishing instead."
+            exit 1
+          fi
+          if ! WHO=$(npm whoami 2>&1); then
+            echo "::error::npm did not accept the NPM_TOKEN secret: $WHO"
+            exit 1
+          fi
+          echo "Authenticated to npm as $WHO."
+
       # npm would reject a duplicate anyway, but it does so after running
       # everything below. Failing here says why in one line.
       - name: Version must not already exist on npm
@@ -134,3 +165,31 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "$TAG" \
             --notes-file /tmp/release-notes.md
+
+      # E403 from the registry after a successful login is the confusing one:
+      # the token is valid, it is simply not permitted to publish this package.
+      # For a name that does not exist yet, that almost always means a granular
+      # access token scoped to selected packages, which cannot create new ones.
+      - name: Explain a publish rejection
+        if: failure()
+        run: |
+          cat <<'NOTE'
+          If the Publish step failed with:
+
+            npm error 403 Forbidden - PUT https://registry.npmjs.org/<name>
+            You may not perform that action with these credentials.
+
+          then the token authenticated and the registry refused the write. The
+          usual causes, in order of likelihood:
+
+            1. A granular access token whose "Packages and scopes" is set to
+               "Only select packages". Such a token cannot create a package
+               that does not exist yet. Set it to "All packages" with read and
+               write, or publish the first version by hand and then narrow the
+               token to that package.
+            2. The name is taken by someone else. `npm view <name>` will say so.
+            3. The account has publishing disabled, or the package is owned by
+               an org this account is not a member of.
+
+          A missing or expired token fails earlier, at the credentials check.
+          NOTE
