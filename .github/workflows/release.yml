@@ -11,6 +11,14 @@ name: Release
 #      possible — some networks and proxies permit writes to refs/heads/* and
 #      refuse refs/tags/*, which shows up as a bare 403 with no explanation.
 #
+# Two ways to authenticate to npm:
+#
+#   token   an NPM_TOKEN repository secret.
+#   OIDC    set the repository variable NPM_TRUSTED_PUBLISHING=true, configure
+#           this package's Trusted Publisher on npmjs.com (this repository,
+#           workflow filename release.yml, and at least one allowed action),
+#           and delete the secret. No long-lived credential exists at all.
+#
 # Publishing from CI rather than a laptop buys three things: the tests that gate
 # the release are the same ones CI runs, --provenance produces a real attestation
 # (it only does so from a trusted CI environment — the same flag run locally is
@@ -53,6 +61,15 @@ jobs:
           # OIDC or a token.
           registry-url: 'https://registry.npmjs.org'
 
+      # Node 22 bundles npm 10.9.x, and trusted publishing needs 11.5.1 or
+      # later. An old npm does not error on an OIDC-only setup — it simply
+      # never attempts the token exchange, falls back to token auth, finds no
+      # token, and dies as ENEEDAUTH. That is indistinguishable from a missing
+      # secret and sends you looking in entirely the wrong place.
+      - name: npm new enough to speak OIDC
+        if: vars.NPM_TRUSTED_PUBLISHING == 'true'
+        run: npm install -g npm@latest
+
       - run: npm install
 
       # A version that disagrees with package.json publishes the wrong version
@@ -76,28 +93,32 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
-      # Both of npm's authentication failures are expensive to discover late.
-      # Everything below this point spins up service containers and runs the
-      # full suite — several minutes — only to be told at the very last step
-      # that the registry will not take the package. These two checks cost a
-      # second and cover the cases that actually happen:
-      #
-      #   no secret at all   -> ENEEDAUTH, and the log shows an empty
-      #                         NODE_AUTH_TOKEN, which is easy to read past
-      #   a bad or expired
-      #   token              -> E401 at the very end
-      #
-      # What they cannot catch is a token that authenticates but is not allowed
-      # to publish *this* package — see the hint after the publish step.
-      - name: Check the npm credentials before spending a test run
+      # Whichever way this run authenticates, the failure is expensive to find
+      # at the last step, after the suite has already run. Both modes are
+      # checked here, in about a second.
+      - name: Check how this run will authenticate to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TRUSTED: ${{ vars.NPM_TRUSTED_PUBLISHING }}
         run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            if [ "${{ vars.NPM_TRUSTED_PUBLISHING }}" = "true" ]; then
-              echo "No NPM_TOKEN, and NPM_TRUSTED_PUBLISHING is set. Relying on OIDC."
-              exit 0
+          if [ "$TRUSTED" = "true" ]; then
+            # Proof the job can actually mint an OIDC token. Without
+            # "permissions: id-token: write" this variable is simply absent and
+            # npm silently falls back to token auth.
+            if [ -z "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
+              echo "::error::This job cannot mint an OIDC token, so trusted publishing cannot work. Check that the workflow grants permissions: id-token: write."
+              exit 1
             fi
+            NPM_VERSION=$(npm --version)
+            if [ "$(printf '11.5.1\n%s\n' "$NPM_VERSION" | sort -V | head -1)" != "11.5.1" ]; then
+              echo "::error::npm $NPM_VERSION is too old for trusted publishing, which needs 11.5.1 or later. An older npm ignores OIDC rather than failing on it, so the run dies later as ENEEDAUTH instead."
+              exit 1
+            fi
+            echo "Mode: trusted publishing. npm $NPM_VERSION, OIDC token endpoint present, no token in use."
+            exit 0
+          fi
+
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
             echo "::error::The NPM_TOKEN secret is not set on this repository. Secrets are per-repository — setting one on a sibling repo does nothing here. Add it under Settings > Secrets and variables > Actions, or set the repository variable NPM_TRUSTED_PUBLISHING=true if you have configured npm Trusted Publishing instead."
             exit 1
           fi
@@ -105,7 +126,7 @@ jobs:
             echo "::error::npm did not accept the NPM_TOKEN secret: $WHO"
             exit 1
           fi
-          echo "Authenticated to npm as $WHO."
+          echo "Mode: token. Authenticated to npm as $WHO."
 
       # npm would reject a duplicate anyway, but it does so after running
       # everything below. Failing here says why in one line.
@@ -137,10 +158,13 @@ jobs:
       - name: Publish
         run: npm publish --provenance --access public
         env:
-          # Ignored when npm Trusted Publishing is configured for this package —
-          # npm exchanges the OIDC token above instead. Set the NPM_TOKEN secret
-          # only if you are not using trusted publishing.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Deliberately empty under trusted publishing. npm detects the OIDC
+          # environment and exchanges a short-lived, workflow-scoped token
+          # itself; leaving a stale secret in the environment only gives it
+          # something wrong to try first. (--provenance is redundant there too,
+          # since trusted publishing attests by default, but it is harmless and
+          # keeps one publish command for both modes.)
+          NODE_AUTH_TOKEN: ${{ vars.NPM_TRUSTED_PUBLISHING == 'true' && '' || secrets.NPM_TOKEN }}
 
       # Release notes are built into a file rather than passed inline. A
       # multi-line --notes argument must stay indented inside the block scalar;
